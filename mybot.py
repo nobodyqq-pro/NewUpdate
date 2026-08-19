@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ==============================================
-#  Ruijie Voucher Scanner  —  v7.2 (Sequential + Random)
+#  Ruijie Voucher Scanner  —  v7.3 (Switchable Sequential/Random)
 # ==============================================
 
 import requests
@@ -271,12 +271,13 @@ async def run_scan(session_url, start_code, end_code, workers):
     digits = max(len(str(start_code)), len(str(end_code)))
     total = end_code - start_code + 1
     
-    if SCAN_TYPE == "sequential":
-        code_iter = iter_sequential_codes(start_code, end_code)
-        cprint(f"\n  [+] Mode: Sequential ({digits}-digit)", C.CYAN, bold=True)
-    else:
+    # Switch between sequential and random based on SCAN_TYPE
+    if SCAN_TYPE.lower() == "random":
         code_iter = iter_random_codes(start_code, end_code)
         cprint(f"\n  [+] Mode: Random ({digits}-digit)", C.CYAN, bold=True)
+    else:
+        code_iter = iter_sequential_codes(start_code, end_code)
+        cprint(f"\n  [+] Mode: Sequential ({digits}-digit)", C.CYAN, bold=True)
     
     cprint(f"  [+] Range: {str(start_code).zfill(digits)} -> {str(end_code).zfill(digits)} ({total:,} codes)", C.YELLOW)
     cprint(f"  [+] Workers: {workers}\n", C.GREEN)

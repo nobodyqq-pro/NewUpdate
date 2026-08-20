@@ -1,0 +1,2 @@
+user:pass@proxy1.com:1080
+user:pass@proxy2.com:1080

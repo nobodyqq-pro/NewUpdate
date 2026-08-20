@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ==============================================
-#  Ruijie Voucher Scanner  —  v7.4 (Telegram Commands)
+#  Ruijie Voucher Scanner  —  v7.6 (Inline Keyboard)
 # ==============================================
 
 import requests
@@ -64,6 +64,7 @@ SCAN_TYPE = os.getenv("SCAN_TYPE", "sequential")
 THREADS = int(os.getenv("THREADS", "50"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+ALLOWED_USERS = os.getenv("ALLOWED_USERS", TELEGRAM_CHAT_ID).split(",")
 FOUND_FILE = "found_voucher.txt"
 RESULT_FILE = "scan_results.txt"
 
@@ -88,14 +89,43 @@ current_scan_type = SCAN_TYPE
 current_mode = MODE
 current_url = TARGET_URL
 
-def send_telegram(message):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+def send_telegram(message, chat_id=None, reply_markup=None):
+    if not TELEGRAM_BOT_TOKEN:
         return
+    if chat_id is None:
+        chat_id = TELEGRAM_CHAT_ID
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message}, timeout=3)
+        payload = {"chat_id": chat_id, "text": message}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
+        requests.post(url, json=payload, timeout=10)
     except:
         pass
+
+def get_main_keyboard():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "🔄 Sequential", "callback_data": "set_sequential"},
+                {"text": "🎲 Random", "callback_data": "set_random"}
+            ],
+            [
+                {"text": "🔢 Mode 6", "callback_data": "set_mode_6"},
+                {"text": "🔢 Mode 7", "callback_data": "set_mode_7"},
+                {"text": "🔢 Mode 8", "callback_data": "set_mode_8"},
+                {"text": "🔢 Mode 9", "callback_data": "set_mode_9"}
+            ],
+            [
+                {"text": "🔗 Set URL", "callback_data": "set_url"},
+                {"text": "📊 Status", "callback_data": "get_status"}
+            ],
+            [
+                {"text": "🚀 Start Scan", "callback_data": "start_scan"},
+                {"text": "⏹️ Stop Scan", "callback_data": "stop_scan"}
+            ]
+        ]
+    }
 
 def handle_telegram_updates():
     global current_scan_type, current_mode, current_url, scanning_active
@@ -103,7 +133,7 @@ def handle_telegram_updates():
     while True:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates?offset={last_update_id+1}&timeout=30"
-            response = requests.get(url, timeout=30)
+            response = requests.get(url, timeout=60)
             if response.status_code != 200:
                 time.sleep(5)
                 continue
@@ -115,93 +145,102 @@ def handle_telegram_updates():
             
             for update in data.get("result", []):
                 last_update_id = update.get("update_id", last_update_id)
+                
+                # Handle Callback Query (button clicks)
+                callback = update.get("callback_query")
+                if callback:
+                    chat_id = str(callback.get("message", {}).get("chat", {}).get("id", ""))
+                    if chat_id not in ALLOWED_USERS:
+                        send_telegram("❌ You are not authorized.", chat_id)
+                        continue
+                    
+                    data = callback.get("data", "")
+                    message_id = callback.get("message", {}).get("message_id")
+                    
+                    if data == "set_sequential":
+                        current_scan_type = "sequential"
+                        send_telegram("✅ Scan type set to: **Sequential**", chat_id)
+                    elif data == "set_random":
+                        current_scan_type = "random"
+                        send_telegram("✅ Scan type set to: **Random**", chat_id)
+                    elif data == "set_mode_6":
+                        current_mode = "6"
+                        send_telegram("✅ Mode set to: **6-digit**", chat_id)
+                    elif data == "set_mode_7":
+                        current_mode = "7"
+                        send_telegram("✅ Mode set to: **7-digit**", chat_id)
+                    elif data == "set_mode_8":
+                        current_mode = "8"
+                        send_telegram("✅ Mode set to: **8-digit**", chat_id)
+                    elif data == "set_mode_9":
+                        current_mode = "9"
+                        send_telegram("✅ Mode set to: **9-digit**", chat_id)
+                    elif data == "set_url":
+                        send_telegram("🔗 Send the Portal URL as a message.\nExample: `https://portal-as.ruijienetworks.com/...`", chat_id)
+                    elif data == "get_status":
+                        status = f"📊 **Current Status**\n\n"
+                        status += f"🔢 Mode: `{current_mode}`\n"
+                        status += f"📡 Scan Type: `{current_scan_type}`\n"
+                        status += f"🔍 Scan Active: `{scanning_active}`\n"
+                        status += f"🔗 URL: `{current_url[:50]}...`\n"
+                        send_telegram(status, chat_id)
+                    elif data == "start_scan":
+                        if scanning_active:
+                            send_telegram("⚠️ Scan is already running!", chat_id)
+                            continue
+                        if not current_url:
+                            send_telegram("❌ No URL set. Use 'Set URL' button first.", chat_id)
+                            continue
+                        scanning_active = True
+                        send_telegram(f"🚀 **Scan Started!**\nMode: `{current_mode}`\nType: `{current_scan_type}`", chat_id)
+                        Thread(target=run_scan_thread, daemon=True).start()
+                    elif data == "stop_scan":
+                        if not scanning_active:
+                            send_telegram("⚠️ No scan is running.", chat_id)
+                            continue
+                        scanning_active = False
+                        send_telegram("⏹️ Scan stopped.", chat_id)
+                    
+                    # Answer callback query
+                    answer_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
+                    requests.post(answer_url, json={"callback_query_id": callback["id"]})
+                    continue
+                
+                # Handle text messages
                 message = update.get("message", {})
                 if not message:
                     continue
                 
                 chat_id = str(message.get("chat", {}).get("id", ""))
-                if chat_id != TELEGRAM_CHAT_ID:
+                if chat_id not in ALLOWED_USERS:
+                    send_telegram("❌ You are not authorized.", chat_id)
                     continue
                 
                 text = message.get("text", "").strip()
                 if not text:
                     continue
                 
-                if text.startswith("/scan_type"):
-                    parts = text.split()
-                    if len(parts) < 2:
-                        send_telegram("❌ Usage: /scan_type sequential or /scan_type random")
-                        continue
-                    new_type = parts[1].lower()
-                    if new_type not in ["sequential", "random"]:
-                        send_telegram("❌ Invalid scan type. Use: sequential or random")
-                        continue
-                    current_scan_type = new_type
-                    send_telegram(f"✅ Scan type changed to: {new_type}")
-                
-                elif text.startswith("/mode"):
-                    parts = text.split()
-                    if len(parts) < 2:
-                        send_telegram("❌ Usage: /mode 6, 7, 8, or 9")
-                        continue
-                    new_mode = parts[1]
-                    if new_mode not in ["6", "7", "8", "9"]:
-                        send_telegram("❌ Invalid mode. Use: 6, 7, 8, or 9")
-                        continue
-                    current_mode = new_mode
-                    send_telegram(f"✅ Mode changed to: {new_mode}")
-                
+                if text.startswith("/start"):
+                    send_telegram(
+                        "🤖 **Ruijie Voucher Scanner Bot**\n\n"
+                        "Use the buttons below to control the bot:",
+                        chat_id,
+                        reply_markup=get_main_keyboard()
+                    )
+                elif text.startswith("http") and "ruijienetworks.com" in text:
+                    current_url = text
+                    send_telegram(f"✅ URL updated successfully!\n\n`{text}`", chat_id)
                 elif text.startswith("/url"):
                     parts = text.split(maxsplit=1)
                     if len(parts) < 2:
-                        send_telegram("❌ Usage: /url https://portal-as.ruijienetworks.com/...")
+                        send_telegram("❌ Usage: /url https://portal-as.ruijienetworks.com/...", chat_id)
                         continue
                     new_url = parts[1].strip()
                     if "ruijienetworks.com" not in new_url:
-                        send_telegram("❌ Invalid URL. Must contain ruijienetworks.com")
+                        send_telegram("❌ Invalid URL. Must contain ruijienetworks.com", chat_id)
                         continue
                     current_url = new_url
-                    send_telegram(f"✅ URL updated successfully!")
-                
-                elif text == "/status":
-                    status = f"📊 Current Status:\n\n"
-                    status += f"🔢 Mode: {current_mode}\n"
-                    status += f"📡 Scan Type: {current_scan_type}\n"
-                    status += f"🔍 Scan Active: {scanning_active}\n"
-                    status += f"🔗 URL: {current_url[:50]}...\n"
-                    send_telegram(status)
-                
-                elif text == "/start":
-                    send_telegram("🤖 Ruijie Voucher Scanner Bot\n\n"
-                                 "Commands:\n"
-                                 "/scan_type sequential - Set sequential scan\n"
-                                 "/scan_type random - Set random scan\n"
-                                 "/mode 6 - Set 6-digit mode\n"
-                                 "/mode 7 - Set 7-digit mode\n"
-                                 "/mode 8 - Set 8-digit mode\n"
-                                 "/mode 9 - Set 9-digit mode\n"
-                                 "/url <portal_url> - Set portal URL\n"
-                                 "/status - Show current status\n"
-                                 "/start_scan - Start scanning\n"
-                                 "/stop_scan - Stop scanning")
-                
-                elif text == "/start_scan":
-                    if scanning_active:
-                        send_telegram("⚠️ Scan is already running!")
-                        continue
-                    if not current_url:
-                        send_telegram("❌ No URL set. Use /url to set one.")
-                        continue
-                    scanning_active = True
-                    send_telegram(f"🚀 Starting scan with:\nMode: {current_mode}\nType: {current_scan_type}")
-                    Thread(target=run_scan_thread, daemon=True).start()
-                
-                elif text == "/stop_scan":
-                    if not scanning_active:
-                        send_telegram("⚠️ No scan is running.")
-                        continue
-                    scanning_active = False
-                    send_telegram("⏹️ Scan stopped.")
+                    send_telegram(f"✅ URL updated successfully!", chat_id)
                 
         except Exception as e:
             print(f"Telegram error: {e}")
@@ -210,7 +249,6 @@ def handle_telegram_updates():
 def run_scan_thread():
     global scanning_active
     try:
-        # Determine range based on mode
         if current_mode == "6":
             start_code, end_code = 0, 999999
         elif current_mode == "7":
@@ -408,7 +446,8 @@ def stats_printer():
         time.sleep(1)
         elapsed = time.time() - start_time
         speed = tried / elapsed if elapsed > 0 else 0
-        sys.stdout.write(f"\r\U0001F552 SPEED: {speed:.1f} c/s | TRIED: {tried} | HITS: {len(hits)}")
+        speed_min = speed * 60
+        sys.stdout.write(f"\r\U0001F552 SPEED: {speed_min:.0f} c/min | TRIED: {tried} | HITS: {len(hits)}")
         sys.stdout.flush()
     print()
 
@@ -479,7 +518,7 @@ def main():
     Thread(target=run_web, daemon=True).start()
     
     # Start Telegram handler
-    if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+    if TELEGRAM_BOT_TOKEN:
         Thread(target=handle_telegram_updates, daemon=True).start()
         send_telegram("🤖 Bot started! Use /start for commands.")
     else:

